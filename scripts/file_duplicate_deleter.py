@@ -258,19 +258,43 @@ def select_file_to_keep(
     # 逐级比较（从最接近文件的目录开始）
     max_depth = max(len(v) for v in ancestral_mtimes.values())
     
+    # 获取 root_dir 的修改时间，用于填充已到达根目录的文件
+    try:
+        root_mtime = os.path.getmtime(str(root_path))
+    except OSError:
+        root_mtime = 0.0
+    
     for depth in range(max_depth):
         level_mtimes = []
+        all_at_root = True  # 默认假设所有文件都在 root
+        
         for i in candidates:
-            if depth < len(ancestral_mtimes[i]):
-                level_mtimes.append((i, ancestral_mtimes[i][depth][1]))
+            ancestral_chain = ancestral_mtimes[i]
+            if depth < len(ancestral_chain):
+                # 正常获取该深度的目录时间
+                dir_path, dir_mtime = ancestral_chain[depth]
+                level_mtimes.append((i, dir_mtime))
+                # 检查该目录是否是 root_dir
+                if dir_path != str(root_path):
+                    all_at_root = False
             else:
-                level_mtimes.append((i, 0.0))
+                # 祖先链已结束，说明已到达 root_dir，用 root_mtime 填充
+                level_mtimes.append((i, root_mtime))
+                # 此时认为该文件已到达 root
+        
+        # 如果所有候选在该深度都已在 root_dir，无法区分，跳过该轮
+        if all_at_root:
+            continue
         
         max_level_mtime = max(lm[1] for lm in level_mtimes)
         new_candidates = [lm[0] for lm in level_mtimes if lm[1] == max_level_mtime]
         
         if len(new_candidates) == 1:
-            dir_path = ancestral_mtimes[new_candidates[0]][depth][0]
+            # 找到能区分的文件
+            if depth < len(ancestral_mtimes[new_candidates[0]]):
+                dir_path = ancestral_mtimes[new_candidates[0]][depth][0]
+            else:
+                dir_path = str(root_path)
             mtime_str = datetime.fromtimestamp(max_level_mtime).strftime("%Y-%m-%d %H:%M:%S")
             return new_candidates[0], (
                 f"追溯至目录 '{dir_path}' 修改时间最新 ({mtime_str})"
@@ -443,6 +467,7 @@ def process_duplicates(
     root_dir: str,
     mode: str = "recycle",
     auto_confirm: bool = False,
+    log_file: Optional[object] = None,
 ) -> dict:
     """
     处理所有重复文件组。
@@ -452,6 +477,7 @@ def process_duplicates(
         root_dir: 原始扫描根目录
         mode: 删除模式
         auto_confirm: 是否自动确认（跳过确认提示）
+        log_file: 日志文件对象（已打开），用于记录详细处理信息
     
     Returns:
         处理统计信息
@@ -464,6 +490,7 @@ def process_duplicates(
         "files_verify_failed": 0,
         "space_freed": 0,
         "errors": 0,
+        "cancelled": False,
     }
     
     total_groups = len(duplicates)
@@ -500,6 +527,7 @@ def process_duplicates(
         confirm = input("  确认开始处理？(y/N): ").strip().lower()
         if confirm != "y":
             print("  操作已取消。")
+            stats["cancelled"] = True
             return stats
     
     # 逐组处理
@@ -511,6 +539,15 @@ def process_duplicates(
         print(f"  SHA256: {dup['sha256']}")
         print(f"  大小:   {format_size(dup['size'])}")
         print("=" * 60)
+        
+        # 写入日志文件
+        if log_file:
+            log_file.write(f"\n{'─' * 60}\n")
+            log_file.write(f"组 {i}/{total_groups}\n")
+            log_file.write(f"MD5:    {dup['md5']}\n")
+            log_file.write(f"SHA256: {dup['sha256']}\n")
+            log_file.write(f"大小:   {format_size(dup['size'])}\n")
+            log_file.write(f"原始文件数: {dup['count']}\n")
         
         files = dup["files"]
         mtimes = dup["mtimes"]
@@ -527,6 +564,8 @@ def process_duplicates(
         if len(existing_indices) <= 1:
             print("  只剩 0 或 1 个文件，无需处理。")
             stats["groups_processed"] += 1
+            if log_file:
+                log_file.write(f"\n[结果] 文件不存在或只剩1个，跳过处理\n")
             continue
         
         existing_files = [files[j] for j in existing_indices]
@@ -548,6 +587,8 @@ def process_duplicates(
         if len(hash_verified_files) <= 1:
             print("  哈希验证后只剩 0 或 1 个文件，无需处理。")
             stats["groups_processed"] += 1
+            if log_file:
+                log_file.write(f"\n[结果] 哈希验证后只剩0或1个文件，跳过处理\n")
             continue
 
         existing_files = hash_verified_files
@@ -560,6 +601,16 @@ def process_duplicates(
         print(f"\n  ► 保留: {keep_file}")
         print(f"    原因: {reason}")
         stats["files_kept"] += 1
+        
+        # 写入日志文件 - 保留的文件
+        if log_file:
+            log_file.write(f"\n[保留文件]\n")
+            log_file.write(f"  文件: {keep_file}\n")
+            log_file.write(f"  原因: {reason}\n")
+            log_file.write(f"\n[待删除文件]\n")
+        
+        deleted_files = []
+        skipped_files = []
         
         # 对要删除的文件逐个验证并删除
         for j, filepath in enumerate(existing_files):
@@ -574,11 +625,13 @@ def process_duplicates(
             if not os.path.exists(filepath):
                 print(f"    [跳过] 文件已不存在: {filepath}")
                 stats["files_skipped"] += 1
+                skipped_files.append((filepath, "文件已不存在"))
                 continue
             
             if not os.path.exists(keep_file):
                 print(f"    [错误] 保留文件不存在: {keep_file}")
                 stats["errors"] += 1
+                skipped_files.append((filepath, "保留文件不存在"))
                 continue
             
             is_identical = verify_files_identical(keep_file, filepath)
@@ -587,6 +640,7 @@ def process_duplicates(
                 print(f"    ⚠ 字节不一致！跳过删除: {filepath}")
                 print(f"    （哈希相同但实际内容不同，可能存在哈希碰撞或文件被修改）")
                 stats["files_verify_failed"] += 1
+                skipped_files.append((filepath, "字节不一致"))
                 continue
             
             print(f"    ✓ 字节完全一致，确认可删除")
@@ -595,8 +649,22 @@ def process_duplicates(
             if delete_file(filepath, mode):
                 stats["files_deleted"] += 1
                 stats["space_freed"] += dup["size"]
+                deleted_files.append(filepath)
             else:
                 stats["errors"] += 1
+                skipped_files.append((filepath, "删除失败"))
+        
+        # 写入日志文件 - 删除结果
+        if log_file:
+            if deleted_files:
+                log_file.write(f"  已删除 ({len(deleted_files)} 个):\n")
+                for f in deleted_files:
+                    log_file.write(f"    - {f}\n")
+            if skipped_files:
+                log_file.write(f"  未删除 ({len(skipped_files)} 个):\n")
+                for f, reason in skipped_files:
+                    log_file.write(f"    - {f} ({reason})\n")
+            log_file.write(f"\n本组统计: 保留 1 个, 删除 {len(deleted_files)} 个, 未删除 {len(skipped_files)} 个\n")
         
         stats["groups_processed"] += 1
     
@@ -628,7 +696,10 @@ def main():
 安全措施:
   - 删除前逐字节验证文件完全一致
   - 支持 dry-run 模式预览
-  - 支持回收站模式（需安装 send2trash: pip install send2trash）
+  - 支持回收站模式（
+        需安装 send2trash: pip install send2trash
+        windows 环境可如下安装 send2trash: python -m pip install send2trash
+    ）
         """,
     )
     parser.add_argument(
@@ -689,6 +760,8 @@ def main():
     if args.mode == "recycle" and not HAS_SEND2TRASH:
         print("错误: send2trash 未安装，无法使用回收站模式。")
         print("      安装方法: pip install send2trash")
+        print("      Windows 下单独安装 Python 时 pip 在 python/scripts 下，")
+        print("      如上述指令失败可尝试使用: python -m pip install send2trash")
         print()
         print("请选择替代方案：")
         print("  1. 安装 send2trash 后重新运行（推荐）")
@@ -712,51 +785,77 @@ def main():
     
     print(f"解析完成: {len(duplicates)} 组重复文件")
     
-    # 处理重复文件
-    stats = process_duplicates(
-        duplicates,
-        root_dir,
-        mode=args.mode,
-        auto_confirm=args.yes,
-    )
-    
-    # 输出统计
-    print()
-    print("=" * 60)
-    print("  处理完成！统计信息:")
-    print("=" * 60)
-    print(f"  处理的文件组:     {stats['groups_processed']}")
-    print(f"  保留的文件:       {stats['files_kept']}")
-    print(f"  删除的文件:       {stats['files_deleted']}")
-    print(f"  跳过的文件:       {stats['files_skipped']}")
-    print(f"  验证失败的文件:   {stats['files_verify_failed']}")
-    print(f"  出错的文件:       {stats['errors']}")
-    print(f"  释放的空间:       {format_size(stats['space_freed'])}")
-    
-    if stats["files_verify_failed"] > 0:
-        print()
-        print("  ⚠ 注意: 有文件哈希相同但字节不一致，这可能表示：")
-        print("    - 哈希碰撞（极少见）")
-        print("    - 文件在扫描后被修改")
-        print("    - 文件系统问题")
-        print("  这些文件未被删除，请手动检查。")
-    
-    # 保存处理日志
+    # 打开日志文件
     log_dir = os.path.dirname(os.path.abspath(args.report))
     log_path = os.path.join(log_dir, "deletion_log.txt")
     
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"\n{'=' * 60}\n")
-        f.write(f"处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"删除模式: {args.mode}\n")
-        f.write(f"处理组数: {stats['groups_processed']}\n")
-        f.write(f"删除文件: {stats['files_deleted']}\n")
-        f.write(f"保留文件: {stats['files_kept']}\n")
-        f.write(f"释放空间: {format_size(stats['space_freed'])}\n")
-        f.write(f"验证失败: {stats['files_verify_failed']}\n")
-        f.write(f"错误:     {stats['errors']}\n")
+    with open(log_path, "a", encoding="utf-8") as log_file:
+        # 写入日志头部
+        log_file.write(f"\n{'=' * 60}\n")
+        log_file.write(f"处理时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        log_file.write(f"扫描根目录: {root_dir}\n")
+        log_file.write(f"删除模式: {args.mode}\n")
+        log_file.write(f"重复文件组数: {len(duplicates)}\n")
+        log_file.write(f"{'=' * 60}\n")
+        
+        # 处理重复文件
+        stats = process_duplicates(
+            duplicates,
+            root_dir,
+            mode=args.mode,
+            auto_confirm=args.yes,
+            log_file=log_file,
+        )
+        
+        # 写入日志尾部 - 统计信息
+        if stats["cancelled"]:
+            log_file.write(f"\n{'=' * 60}\n")
+            log_file.write(f"[用户取消操作]\n")
+            log_file.write(f"{'=' * 60}\n")
+            log_file.write(f"未进行任何删除操作。\n")
+        else:
+            log_file.write(f"\n{'=' * 60}\n")
+            log_file.write(f"处理结果统计:\n")
+            log_file.write(f"{'=' * 60}\n")
+            log_file.write(f"  处理的文件组:     {stats['groups_processed']}\n")
+            log_file.write(f"  保留的文件:       {stats['files_kept']}\n")
+            log_file.write(f"  删除的文件:       {stats['files_deleted']}\n")
+            log_file.write(f"  跳过的文件:       {stats['files_skipped']}\n")
+            log_file.write(f"  验证失败的文件:   {stats['files_verify_failed']}\n")
+            log_file.write(f"  出错的文件:       {stats['errors']}\n")
+            log_file.write(f"  释放的空间:       {format_size(stats['space_freed'])}\n")
+            
+            if stats["files_verify_failed"] > 0:
+                log_file.write(f"\n注意: 有 {stats['files_verify_failed']} 个文件哈希相同但字节不一致，已跳过删除。\n")
     
-    print(f"\n  处理日志已追加至: {log_path}")
+    # 输出统计
+    print()
+    if stats["cancelled"]:
+        print("=" * 60)
+        print("  操作已取消")
+        print("=" * 60)
+        print("  未进行任何删除操作。")
+    else:
+        print("=" * 60)
+        print("  处理完成！统计信息:")
+        print("=" * 60)
+        print(f"  处理的文件组:     {stats['groups_processed']}")
+        print(f"  保留的文件:       {stats['files_kept']}")
+        print(f"  删除的文件:       {stats['files_deleted']}")
+        print(f"  跳过的文件:       {stats['files_skipped']}")
+        print(f"  验证失败的文件:   {stats['files_verify_failed']}")
+        print(f"  出错的文件:       {stats['errors']}")
+        print(f"  释放的空间:       {format_size(stats['space_freed'])}")
+        
+        if stats["files_verify_failed"] > 0:
+            print()
+            print("  ⚠ 注意: 有文件哈希相同但字节不一致，这可能表示：")
+            print("    - 哈希碰撞（极少见）")
+            print("    - 文件在扫描后被修改")
+            print("    - 文件系统问题")
+            print("  这些文件未被删除，请手动检查。")
+    
+    print(f"\n  处理日志已保存至: {log_path}")
 
 
 if __name__ == "__main__":
