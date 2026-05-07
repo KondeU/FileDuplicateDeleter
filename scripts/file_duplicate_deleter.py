@@ -23,9 +23,9 @@
   duplicate_report.csv  - 由 file_hash_analyzer.py 生成的重复报告文件
   --root               - 原始扫描的根目录（用于追溯文件夹日期时的边界）
   --mode               - 删除模式:
-                         delete   - 永久删除（默认）
-                         recycle  - 移动到回收站（如果系统支持）
-                         dry-run  - 仅模拟，不实际删除
+                          recycle  - 移动到回收站（默认，推荐）
+                          delete   - 永久删除（需谨慎）
+                          dry-run  - 仅模拟，不实际删除
 """
 
 import argparse
@@ -367,7 +367,7 @@ def parse_duplicate_report(report_path: str) -> list[dict]:
     return duplicates
 
 
-def delete_file(filepath: str, mode: str = "delete") -> bool:
+def delete_file(filepath: str, mode: str = "recycle") -> bool:
     """
     删除文件。
     
@@ -416,7 +416,7 @@ def delete_file(filepath: str, mode: str = "delete") -> bool:
 def process_duplicates(
     duplicates: list[dict],
     root_dir: str,
-    mode: str = "delete",
+    mode: str = "recycle",
     auto_confirm: bool = False,
 ) -> dict:
     """
@@ -587,6 +587,7 @@ def main():
   python file_duplicate_deleter.py duplicate_report.csv --root /path/to/folder
   python file_duplicate_deleter.py duplicate_report.csv --mode dry-run
   python file_duplicate_deleter.py duplicate_report.csv --mode recycle
+  python file_duplicate_deleter.py duplicate_report.csv --mode delete
   python file_duplicate_deleter.py duplicate_report.csv --yes
 
 保留策略:
@@ -613,8 +614,8 @@ def main():
     parser.add_argument(
         "--mode", "-m",
         choices=["delete", "recycle", "dry-run"],
-        default="delete",
-        help="删除模式: delete=永久删除, recycle=回收站, dry-run=模拟 (默认: delete)",
+        default="recycle",
+        help="删除模式: recycle=回收站(默认), delete=永久删除, dry-run=模拟",
     )
     parser.add_argument(
         "--yes", "-y",
@@ -646,10 +647,15 @@ def main():
     
     # 回收站模式检查
     if args.mode == "recycle" and not HAS_SEND2TRASH:
-        print("警告: send2trash 未安装，回收站模式不可用。")
+        print("错误: send2trash 未安装，无法使用回收站模式。")
         print("      安装方法: pip install send2trash")
-        print("      将回退到永久删除模式。")
-        args.mode = "delete"
+        print()
+        print("请选择替代方案：")
+        print("  1. 安装 send2trash 后重新运行（推荐）")
+        print("  2. 使用 --mode dry-run 先预览")
+        print("  3. 使用 --mode delete 永久删除（需谨慎）")
+        print()
+        sys.exit(1)
     
     print("=" * 60)
     print("       重复文件删除器 (Duplicate File Deleter)")
