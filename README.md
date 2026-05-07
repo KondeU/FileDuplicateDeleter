@@ -326,9 +326,8 @@ FileDuplicateDeleter/
 ├── scripts/
 │   ├── file_hash_analyzer.py    # 扫描器
 │   ├── file_duplicate_deleter.py # 删除器
-│   ├── DELETER_CHAIN_ANALYSIS.md # 详细技术分析
-│   ├── EXECUTION_CHAIN_ANALYSIS.md # 执行链分析
-│   └── CODE_REVIEW.md           # 代码检视报告
+│   ├── DELETER_CHAIN_ANALYSIS.md # 详细策略链路分析
+│   └── EXECUTION_CHAIN_ANALYSIS.md # 执行链和安全性分析
 └── output/                      # 输出目录（自动创建）
     ├── root_path.csv            # 扫描根目录
     ├── duplicate_report.csv     # 重复报告
@@ -345,7 +344,6 @@ FileDuplicateDeleter/
 
 - [DELETER_CHAIN_ANALYSIS.md](scripts/DELETER_CHAIN_ANALYSIS.md) - 详细的策略链路和场景分析
 - [EXECUTION_CHAIN_ANALYSIS.md](scripts/EXECUTION_CHAIN_ANALYSIS.md) - 执行链和安全性分析
-- [CODE_REVIEW.md](scripts/CODE_REVIEW.md) - 代码检视报告
 
 ---
 
