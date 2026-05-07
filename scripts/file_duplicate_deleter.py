@@ -30,6 +30,7 @@
 
 import argparse
 import csv
+import hashlib
 import os
 import sys
 import time
@@ -52,6 +53,53 @@ def format_size(size_bytes: float) -> str:
             return f"{size_bytes:.2f} {unit}"
         size_bytes /= 1024
     return f"{size_bytes:.2f} PB"
+
+
+def compute_file_hashes(filepath: str, chunk_size: int = 8192) -> Optional[tuple[str, str]]:
+    """
+    计算单个文件的 MD5 和 SHA256 哈希值。
+
+    Args:
+        filepath: 文件完整路径
+        chunk_size: 读取块大小（字节），默认 8KB
+
+    Returns:
+        (md5_hex, sha256_hex) 元组，如果文件无法读取则返回 None
+    """
+    md5_hasher = hashlib.md5()
+    sha256_hasher = hashlib.sha256()
+
+    try:
+        with open(filepath, "rb") as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                md5_hasher.update(chunk)
+                sha256_hasher.update(chunk)
+        return md5_hasher.hexdigest(), sha256_hasher.hexdigest()
+    except (PermissionError, OSError, IOError) as e:
+        print(f"    [警告] 无法读取文件: {filepath} ({e})", file=sys.stderr)
+        return None
+
+
+def verify_file_hash(filepath: str, expected_md5: str, expected_sha256: str) -> bool:
+    """
+    验证文件当前的哈希值是否与报告中的预期哈希一致。
+
+    Args:
+        filepath: 文件路径
+        expected_md5: 报告中的 MD5 哈希
+        expected_sha256: 报告中的 SHA256 哈希
+
+    Returns:
+        True 如果哈希一致，否则 False
+    """
+    result = compute_file_hashes(filepath)
+    if result is None:
+        return False
+    md5, sha256 = result
+    return md5 == expected_md5 and sha256 == expected_sha256
 
 
 def verify_files_identical(file1: str, file2: str) -> bool:
@@ -143,21 +191,25 @@ def select_file_to_keep(
     files: list[str],
     mtimes: list[float],
     root_dir: str,
+    file_md5: str = "",
+    file_sha256: str = "",
 ) -> tuple[int, str]:
     """
     根据保留策略选择要保留的文件。
-    
+
     策略优先级：
     1. 文件修改时间最新的
     2. 文件所在文件夹修改时间最新的
     3. 向上追溯父级目录修改时间
     4. 全部一致时让用户选择
-    
+
     Args:
         files: 文件路径列表
         mtimes: 对应的文件修改时间列表
         root_dir: 原始扫描根目录
-    
+        file_md5: 文件组的 MD5 哈希（用于用户选择提示）
+        file_sha256: 文件组的 SHA256 哈希（用于用户选择提示）
+
     Returns:
         (保留文件的索引, 选择原因说明)
     """
@@ -228,7 +280,8 @@ def select_file_to_keep(
     print("=" * 60)
     print("  无法自动决定保留哪个文件，请手动选择：")
     print("=" * 60)
-    print(f"  MD5: {root_dir}")  # placeholder, will be overridden
+    print(f"  MD5:    {file_md5}")
+    print(f"  SHA256: {file_sha256}")
     print()
     
     for i, idx in enumerate(candidates):
@@ -339,12 +392,17 @@ def delete_file(filepath: str, mode: str = "delete") -> bool:
                 send2trash.send2trash(filepath)
                 print(f"    [回收站] 已移至回收站: {filepath}")
                 return True
-            except Exception as e:
-                print(f"    [警告] 无法移至回收站，改为永久删除: {filepath} ({e})")
-                # 回退到永久删除
+            except (OSError, PermissionError, FileNotFoundError) as e:
+                print(f"    [错误] 无法移至回收站: {filepath}")
+                print(f"           原因: {e}")
+                response = input("    是否改为永久删除？(y/N): ").strip().lower()
+                if response != "y":
+                    print(f"    [跳过] 用户选择不永久删除: {filepath}")
+                    return False
         else:
-            print(f"    [警告] send2trash 未安装，改为永久删除")
-    
+            print(f"    [错误] send2trash 未安装，无法使用回收站模式")
+            return False
+
     # 永久删除
     try:
         os.remove(filepath)
@@ -448,9 +506,30 @@ def process_duplicates(
         
         existing_files = [files[j] for j in existing_indices]
         existing_mtimes = [mtimes[j] for j in existing_indices]
-        
+
+        # 验证所有文件的哈希是否与报告一致
+        print("  验证文件哈希与报告一致性...")
+        hash_verified_files = []
+        hash_verified_mtimes = []
+        for j, filepath in enumerate(existing_files):
+            if verify_file_hash(filepath, dup["md5"], dup["sha256"]):
+                hash_verified_files.append(filepath)
+                hash_verified_mtimes.append(existing_mtimes[j])
+            else:
+                print(f"    ⚠ 哈希不一致，跳过: {filepath}")
+                print(f"    （文件在扫描后被修改，或报告数据不准确）")
+                stats["files_verify_failed"] += 1
+
+        if len(hash_verified_files) <= 1:
+            print("  哈希验证后只剩 0 或 1 个文件，无需处理。")
+            stats["groups_processed"] += 1
+            continue
+
+        existing_files = hash_verified_files
+        existing_mtimes = hash_verified_mtimes
+
         # 选择要保留的文件
-        keep_idx, reason = select_file_to_keep(existing_files, existing_mtimes, root_dir)
+        keep_idx, reason = select_file_to_keep(existing_files, existing_mtimes, root_dir, dup["md5"], dup["sha256"])
         keep_file = existing_files[keep_idx]
         
         print(f"\n  ► 保留: {keep_file}")
