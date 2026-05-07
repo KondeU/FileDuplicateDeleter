@@ -272,6 +272,27 @@ def format_size(size_bytes: float) -> str:
     return f"{size_bytes:.2f} PB"
 
 
+def save_root_path(root_dir: str, output_dir: str) -> str:
+    """
+    保存扫描根目录路径到 CSV 文件。
+    
+    Args:
+        root_dir: 扫描的根目录路径
+        output_dir: 输出目录路径
+    
+    Returns:
+        保存的文件路径
+    """
+    output_path = os.path.join(output_dir, "root_path.csv")
+    
+    with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        writer.writerow(["扫描根目录"])
+        writer.writerow([root_dir])
+    
+    return output_path
+
+
 def save_summary(
     files_info: list[dict],
     duplicates: list[dict],
@@ -418,6 +439,7 @@ def main():
     # 第三步：保存结果
     print("正在保存结果...")
     
+    root_path_file = save_root_path(str(Path(args.directory).resolve()), output_dir)
     hash_table_path = save_hash_table(files_info, output_dir)
     report_path = save_duplicate_report(duplicates, output_dir)
     summary_path = save_summary(files_info, duplicates, output_dir, hash_table_path, report_path)
@@ -426,6 +448,7 @@ def main():
     print("=" * 60)
     print("  分析完成！")
     print("=" * 60)
+    print(f"  扫描根目录:   {root_path_file}")
     print(f"  完整哈希表:   {hash_table_path}")
     print(f"  重复文件报告: {report_path}")
     print(f"  分析摘要:     {summary_path}")

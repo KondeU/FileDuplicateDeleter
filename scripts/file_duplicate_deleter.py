@@ -9,20 +9,23 @@
   1. 保留文件修改时间最新的那份
   2. 若文件修改时间相同，保留文件所在文件夹修改时间最新的那份
   3. 若文件夹修改时间也相同，向上查找父级目录的修改时间
-  4. 若一直追溯到用户给定的根目录仍无法区分，则让用户手动选择
+  4. 若一直追溯到扫描根目录仍无法区分，则让用户手动选择
 
 安全措施：
   - 删除前对每个疑似重复文件进行逐字节二进制比对，确保真正完全一致
   - 仅当字节完全一致时才执行删除
   - 删除操作使用"移动到回收站"模式（如支持）或永久删除（需确认）
 
+依赖文件（需在同一目录）：
+  - duplicate_report.csv  - 重复文件报告
+  - root_path.csv         - 扫描根目录路径
+
 用法:
-  python file_duplicate_deleter.py <duplicate_report.csv> [--root <原始扫描根目录>] [--mode <delete|recycle|dry-run>]
+  python file_duplicate_deleter.py <duplicate_report.csv> [--mode <recycle|delete|dry-run>]
 
 参数说明:
   duplicate_report.csv  - 由 file_hash_analyzer.py 生成的重复报告文件
-  --root               - 原始扫描的根目录（用于追溯文件夹日期时的边界）
-  --mode               - 删除模式:
+  --mode                - 删除模式:
                           recycle  - 移动到回收站（默认，推荐）
                           delete   - 永久删除（需谨慎）
                           dry-run  - 仅模拟，不实际删除
@@ -306,6 +309,28 @@ def select_file_to_keep(
             sys.exit(1)
 
 
+def read_root_path(root_path_file: str) -> str:
+    """
+    从 root_path.csv 文件读取扫描根目录。
+    
+    Args:
+        root_path_file: root_path.csv 文件路径
+    
+    Returns:
+        扫描根目录路径
+    
+    Raises:
+        ValueError: 如果文件格式不正确
+    """
+    with open(root_path_file, "r", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        header = next(reader)  # 读取表头
+        row = next(reader)     # 读取数据行
+        if not row or len(row) < 1:
+            raise ValueError(f"root_path.csv 文件格式不正确: {root_path_file}")
+        return row[0]
+
+
 def parse_duplicate_report(report_path: str) -> list[dict]:
     """
     解析 duplicate_report.csv 文件。
@@ -584,11 +609,15 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python file_duplicate_deleter.py duplicate_report.csv --root /path/to/folder
+  python file_duplicate_deleter.py duplicate_report.csv
   python file_duplicate_deleter.py duplicate_report.csv --mode dry-run
   python file_duplicate_deleter.py duplicate_report.csv --mode recycle
   python file_duplicate_deleter.py duplicate_report.csv --mode delete
   python file_duplicate_deleter.py duplicate_report.csv --yes
+
+依赖文件（需在同一目录）:
+  - duplicate_report.csv  - 重复文件报告
+  - root_path.csv         - 扫描根目录路径
 
 保留策略:
   1. 保留文件修改时间最新的
@@ -607,11 +636,6 @@ def main():
         help="duplicate_report.csv 文件路径（由 file_hash_analyzer.py 生成）",
     )
     parser.add_argument(
-        "--root", "-r",
-        help="原始扫描的根目录路径（用于追溯文件夹日期时的边界，默认从报告文件路径推断）",
-        default=None,
-    )
-    parser.add_argument(
         "--mode", "-m",
         choices=["delete", "recycle", "dry-run"],
         default="recycle",
@@ -625,24 +649,40 @@ def main():
     
     args = parser.parse_args()
     
-    # 检查报告文件
+    # 确定报告目录
+    report_dir = os.path.dirname(os.path.abspath(args.report))
+    root_path_file = os.path.join(report_dir, "root_path.csv")
+    
+    # 前置依赖文件检查
+    missing_files = []
     if not os.path.exists(args.report):
-        print(f"错误: 报告文件不存在 - {args.report}", file=sys.stderr)
+        missing_files.append(args.report)
+    if not os.path.exists(root_path_file):
+        missing_files.append(root_path_file)
+    
+    if missing_files:
+        print("错误: 缺少必要的依赖文件:", file=sys.stderr)
+        for f in missing_files:
+            print(f"       - {f}", file=sys.stderr)
+        print()
+        print("请确保以下文件在同一目录:", file=sys.stderr)
+        print("  - duplicate_report.csv  （由 file_hash_analyzer.py 生成）", file=sys.stderr)
+        print("  - root_path.csv         （由 file_hash_analyzer.py 生成）", file=sys.stderr)
+        print()
+        print("请先运行 file_hash_analyzer.py 生成这些文件:", file=sys.stderr)
+        print("  python file_hash_analyzer.py <要扫描的文件夹>", file=sys.stderr)
         sys.exit(1)
     
-    # 确定根目录
-    if args.root:
-        root_dir = str(Path(args.root).resolve())
-    else:
-        # 尝试从同目录的 summary.txt 推断
-        report_dir = os.path.dirname(os.path.abspath(args.report))
-        summary_path = os.path.join(report_dir, "summary.txt")
-        root_dir = report_dir  # 默认使用报告所在目录
-        print(f"提示: 未指定 --root，使用报告目录作为根目录: {root_dir}")
-        print(f"      如果不正确，请使用 --root 参数指定原始扫描根目录")
+    # 从 root_path.csv 读取扫描根目录
+    try:
+        root_dir = read_root_path(root_path_file)
+    except ValueError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        sys.exit(1)
     
     if not os.path.isdir(root_dir):
-        print(f"错误: 根目录不存在 - {root_dir}", file=sys.stderr)
+        print(f"错误: 扫描根目录不存在 - {root_dir}", file=sys.stderr)
+        print("       可能该目录已被删除或移动", file=sys.stderr)
         sys.exit(1)
     
     # 回收站模式检查
