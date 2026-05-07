@@ -158,34 +158,45 @@ def get_dir_mtime(dirpath: str, root_dir: str) -> float:
         return 0.0
 
 
-def get_ancestral_mtime(filepath: str, root_dir: str) -> list[tuple[str, float]]:
+def get_ancestral_mtime_from_root(filepath: str, root_dir: str) -> list[tuple[str, float]]:
     """
-    获取文件所在目录到根目录路径上所有目录的修改时间列表。
+    从 root_dir 开始向下，获取到文件所在目录的所有祖先目录修改时间。
     
-    从文件所在目录开始，依次向上直到根目录。
+    从 root_dir 开始，依次向下直到文件所在目录。
+    这样可以保证不同深度的文件在比较时"对齐"到同一层级。
     
     Args:
         filepath: 文件路径
-        root_dir: 根目录路径（边界）
+        root_dir: 根目录路径（起点）
     
     Returns:
-        [(目录路径, 修改时间), ...] 列表，从文件所在目录到根目录
+        [(目录路径, 修改时间), ...] 列表，从 root_dir 到文件所在目录
     """
     root_path = Path(root_dir).resolve()
     file_path = Path(filepath).resolve()
-    parent = file_path.parent
     
-    result = []
+    # 获取从 root 到文件所在目录的路径列表
+    path_chain = []
+    current = file_path.parent
+    
+    # 先收集从文件目录到 root 的路径（向上）
     while True:
+        path_chain.append(current)
+        if current == root_path or current.parent == current:
+            break
+        current = current.parent
+    
+    # 反转：从 root 到文件目录（向下）
+    path_chain = path_chain[::-1]
+    
+    # 获取每个目录的 mtime
+    result = []
+    for p in path_chain:
         try:
-            mtime = os.path.getmtime(str(parent))
+            mtime = os.path.getmtime(str(p))
         except OSError:
             mtime = 0.0
-        result.append((str(parent), mtime))
-        
-        if parent == root_path or parent.parent == parent:
-            break
-        parent = parent.parent
+        result.append((str(p), mtime))
     
     return result
 
@@ -250,52 +261,50 @@ def select_file_to_keep(
     # === 策略 3：向上追溯父级目录修改时间 ===
     root_path = Path(root_dir).resolve()
     
-    # 获取每个候选文件的祖先目录时间线
+    # 获取每个候选文件的祖先目录时间线（从 root 开始向下）
     ancestral_mtimes = {}
     for i in candidates:
-        ancestral_mtimes[i] = get_ancestral_mtime(files[i], root_dir)
+        ancestral_mtimes[i] = get_ancestral_mtime_from_root(files[i], root_dir)
     
-    # 逐级比较（从最接近文件的目录开始）
+    # 逐级比较（从 root 开始向下，depth=0 总是 root）
     max_depth = max(len(v) for v in ancestral_mtimes.values())
     
-    # 获取 root_dir 的修改时间，用于填充已到达根目录的文件
-    try:
-        root_mtime = os.path.getmtime(str(root_path))
-    except OSError:
-        root_mtime = 0.0
-    
     for depth in range(max_depth):
-        level_mtimes = []
-        all_at_root = True  # 默认假设所有文件都在 root
-        
-        for i in candidates:
-            ancestral_chain = ancestral_mtimes[i]
-            if depth < len(ancestral_chain):
-                # 正常获取该深度的目录时间
-                dir_path, dir_mtime = ancestral_chain[depth]
-                level_mtimes.append((i, dir_mtime))
-                # 检查该目录是否是 root_dir
-                if dir_path != str(root_path):
-                    all_at_root = False
-            else:
-                # 祖先链已结束，说明已到达 root_dir，用 root_mtime 填充
-                level_mtimes.append((i, root_mtime))
-                # 此时认为该文件已到达 root
-        
-        # 如果所有候选在该深度都已在 root_dir，无法区分，跳过该轮
-        if all_at_root:
+        # depth 0 总是 root_dir，所有文件都相同，跳过
+        if depth == 0:
             continue
         
-        max_level_mtime = max(lm[1] for lm in level_mtimes)
-        new_candidates = [lm[0] for lm in level_mtimes if lm[1] == max_level_mtime]
+        # 收集该深度所有候选的目录信息
+        level_info = {}
+        all_have_this_depth = True
+        
+        for i in candidates:
+            if depth < len(ancestral_mtimes[i]):
+                dir_path, dir_mtime = ancestral_mtimes[i][depth]
+                level_info[i] = (dir_path, dir_mtime)
+            else:
+                # 该文件的祖先链已结束（层级较浅）
+                all_have_this_depth = False
+        
+        # 如果有的文件祖先链较短，说明文件在不同层级的目录
+        # 无法公平比较同一层级，进入策略4
+        if not all_have_this_depth:
+            break
+        
+        # 检查是否所有候选在该层级都指向同一个目录
+        unique_dirs = set(info[0] for info in level_info.values())
+        if len(unique_dirs) == 1:
+            # 都在同一目录，无法区分，继续下一层级
+            continue
+        
+        # 不同目录，比较修改时间
+        max_mtime = max(info[1] for info in level_info.values())
+        new_candidates = [i for i, info in level_info.items() if info[1] == max_mtime]
         
         if len(new_candidates) == 1:
-            # 找到能区分的文件
-            if depth < len(ancestral_mtimes[new_candidates[0]]):
-                dir_path = ancestral_mtimes[new_candidates[0]][depth][0]
-            else:
-                dir_path = str(root_path)
-            mtime_str = datetime.fromtimestamp(max_level_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            # 找到唯一候选
+            dir_path = level_info[new_candidates[0]][0]
+            mtime_str = datetime.fromtimestamp(max_mtime).strftime("%Y-%m-%d %H:%M:%S")
             return new_candidates[0], (
                 f"追溯至目录 '{dir_path}' 修改时间最新 ({mtime_str})"
             )
